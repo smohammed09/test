@@ -1,0 +1,98 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "A template to create SNS, IAM, Lambda"
+Parameters:
+ BucketName:
+   Description: "The name of the Bucket on which you want to configure your notification eg. myBucket"
+   Type: String
+ DestinationEndpointARN:
+   Description: "The endpoint represents the ARN of the Target Bucket"
+   Type: String
+###IAM Role Parameters###
+# Actions:
+#    Type: CommaDelimitedList
+#    Description: Comma separated list of permissive AWS actions granted to the role. Eg. s3:GetObject,s3:GetObjectVersion,s3:ListBucketVersions,s3:ListBucket
+# Resources:
+#    Type: CommaDelimitedList
+#    Description: Comma separated ARNs of the AWS resources that the role will have access to. Eg. arn:aws:s3:::mybucket
+ SourceBucketARN:
+    Type: String
+    Description: Enter the source bucket ARN
+ TargetBucketARN:
+    Type: String
+    Description: Enter the source bucket ARN
+
+Resources:
+  SNSTopic:
+   Properties:
+     TopicName: !Sub "${AWS::StackName}-SNS"
+   Type: "AWS::SNS::Topic"
+
+  SNSSubcscription:
+   Properties:
+     TopicArn:
+       Ref: SNSTopic
+     Endpoint:
+       Ref: DestinationEndpointARN
+     Protocol: LAMBDA
+   Type: "AWS::SNS::Subscription"
+
+  SNSpolicy:
+   Properties:
+     PolicyDocument:
+       Id: "<default_policy_ID>"
+       Statement:
+         -
+           Action: "SNS:Publish"
+           Condition:
+             ArnLike:
+               AWS:SourceArn: !Join ['', ['arn:aws:s3:*:*:', Ref: BucketName]]
+           Sid: "<default_statement_ID>"
+           Effect: Allow
+           Principal:
+             AWS: "*"
+           Resource:
+             Ref: SNSTopic
+     Topics:
+       -
+         Ref: SNSTopic
+   Type: "AWS::SNS::TopicPolicy"
+
+###Create IAM Role ###
+
+   LambdaIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            AWS: arn:aws:iam::926226587429:root
+          Action: sts:AssumeRole
+          Condition:
+            StringEquals:
+              sts:ExternalId:
+                Ref: ExternalID
+      Path: "/"
+      Policies:
+      - PolicyName: Lambda_SNS_S3_IamPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource:
+              Ref: arn:aws:logs:*:*:*
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+            Resource:
+              Ref: SourceBucketARN
+          - Effect: Allow
+            Action:
+              - s3:PutObject
+            Resource:
+              Ref: TargetBucketARN
