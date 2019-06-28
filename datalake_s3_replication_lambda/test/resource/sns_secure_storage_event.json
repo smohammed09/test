@@ -1,0 +1,24 @@
+{
+   "Records":[
+      {
+         "EventSource":"aws:sns",
+         "EventVersion":"1.0",
+         "EventSubscriptionArn":"arn:aws:sns:ca-central-1:366175784462:copy-secure-storage-lambda-FileCreatedInSecureStorageBucketTopic-1FQH2OPRM45C7:8d72baa7-c6bd-4449-bcf8-6223d375b8c7",
+         "Sns":{
+            "Type":"Notification",
+            "MessageId":"d1e30a06-634c-533a-957a-5f8aec2d94c9",
+            "TopicArn":"arn:aws:sns:ca-central-1:366175784462:copy-secure-storage-lambda-FileCreatedInSecureStorageBucketTopic-1FQH2OPRM45C7",
+            "Subject":"Amazon S3 Notification",
+            "Message":"{\"Records\":[{\"eventVersion\":\"2.1\",\"eventSource\":\"aws:s3\",\"awsRegion\":\"ca-central-1\",\"eventTime\":\"2019-06-25T21:07:43.588Z\",\"eventName\":\"ObjectCreated:Put\",\"userIdentity\":{\"principalId\":\"AWS:AROAVKQOHBYHDJL2T2SVK:LGuo@loyalty.com\"},\"requestParameters\":{\"sourceIPAddress\":\"158.106.118.12\"},\"responseElements\":{\"x-amz-request-id\":\"F2217F435D2ABF54\",\"x-amz-id-2\":\"4/n4zKkqtVraYlveP+IsQJgdX0uaof4Nhszo0cC3eR3K7CzVp9oIxQjoV0lAUn2g3TS4HpIXjqU=\"},\"s3\":{\"s3SchemaVersion\":\"1.0\",\"configurationId\":\"MzQyYTllY2UtM2IxZS00YTA0LWFkNGEtY2I5YzlhYWQyOThi\",\"bucket\":{\"name\":\"dev-l1-datalake-v1-secure-storage\",\"ownerIdentity\":{\"principalId\":\"ASQBOT03PJCO8\"},\"arn\":\"arn:aws:s3:::dev-l1-datalake-v1-secure-storage\"},\"object\":{\"key\":\"bmo/raw/cardholder/2/another_file.txt\",\"size\":28,\"eTag\":\"3c2c6970c156cd9076e91fc226030da7\",\"sequencer\":\"005D128D1F89D0168C\"}}}]}",
+            "Timestamp":"2019-06-25T21:07:45.190Z",
+            "SignatureVersion":"1",
+            "Signature":"SmQG4not3ratpEJrY4i9fxDmkuG3HjqxhIcSf8paitdCfoILakGfimlds6mV6s4TVwPXS9pUbRJ9IJ46UXxxBZgsHQmuKrWzQHN/nfM06gANxpxmLVS0b93aTkBo6JTuQj0qdTKhYXoaJq7ZiddJ0lfLMWbokHOjIphFUL6izGRpDIMQrgFmMFtosfOFZUMa6sYSVXTzyPUP7d3QNybul7GmR/nxYWbTHqX4oBU7p1nmxSXOxeso5fc+2pct/CRzKXvv560qs2/fe/QvtoP/UuR08G0/3usbxOJWC7TY9gzM1cIwcdJHBbVd/zf8tfDR3MWyJLsd9mfymMJ9XrV5cg==",
+            "SigningCertUrl":"https://sns.ca-central-1.amazonaws.com/SimpleNotificationService-6aad65c2f9911b05cd53efda11f913f9.pem",
+            "UnsubscribeUrl":"https://sns.ca-central-1.amazonaws.com/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:ca-central-1:366175784462:copy-secure-storage-lambda-FileCreatedInSecureStorageBucketTopic-1FQH2OPRM45C7:8d72baa7-c6bd-4449-bcf8-6223d375b8c7",
+            "MessageAttributes":{
+
+            }
+         }
+      }
+   ]
+}

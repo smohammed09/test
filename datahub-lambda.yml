@@ -1,0 +1,209 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  BaseStackName:
+    Type: String
+    Description: The Cloud Formation stack for base Data Lake components
+    MinLength: 1
+    ConstraintDescription: Must be a valid stack name
+  AlarmsEnabled:
+    Type: String
+    AllowedValues: [true, false]
+    Description: Enable or disable CloudWatch alarms.
+    Default: true
+  LambdaCodeS3Bucket:
+    Type: String
+    Description: The S3 bucket containing the zip files of each Lambda's code.
+    MinLength: 1
+    Default: l1-datalake-v1-artifacts
+  S3ReplicationLambdaCodeS3Key:
+    Type: String
+    Description: The S3 key to S3ReplicationLambda code. Must be inside LambdaCodeS3Bucket. Must be a zip file.
+    MinLength: 1
+    Default: lambdas/datalake_s3_replication_lambda.zip
+  LogRetentionInDays:
+    Type: Number
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+    Description: The number of days to retain the CloudWatch logs
+    Default: 545
+    ConstraintDescription: Possible values are 1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, and 3653
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Alarms"
+        Parameters:
+          - AlarmsEnabled
+      - Label:
+          default: "Dependencies"
+        Parameters:
+          - BaseStackName
+          - CatalogStackName
+      - Label:
+          default: "Lambda Code Locations"
+        Parameters:
+          - LambdaCodeS3Bucket
+          - CleanUpLandingLambdaCodeS3Key
+          - LoadingProcessLambdaCodeS3Key
+          - MoveFileToStagingLambdaCodeS3Key
+          - S3ReplicationLambdaCodeS3Key
+
+Conditions:
+  AlarmsEnabled: !Equals [!Ref AlarmsEnabled, true]
+
+Resources:
+  S3ReplicationLambdaAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: AlarmsEnabled
+    Properties:
+      AlarmDescription: S3 Replication Lambda Alarm
+      AlarmActions:
+        - Fn::ImportValue: !Sub '${BaseStackName}-DatalakeNotificationTopicArn'
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 5
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref S3ReplicationLambda
+        - Name: Resource
+          Value: !Ref S3ReplicationLambda
+  S3ReplicationLambdaRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+
+  S3ReplicationLambdaPolicy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      Roles: [!Ref S3ReplicationLambdaRole]
+      PolicyName: !Sub '${AWS::StackName}-s3-replication-policy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Action:
+              - 'logs:CreateLogGroup'
+              - 'logs:CreateLogStream'
+              - 'logs:PutLogEvents'
+            Resource:
+              - 'arn:aws:logs:*:*:*'
+          - Effect: 'Allow'
+            Action:
+              - 's3:GetObject'
+            Resource:
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - Fn::ImportValue: !Sub '${BaseStackName}-DatalakeSourceStorageBucketName'
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - Fn::ImportValue: !Sub '${BaseStackName}-DatalakeSourceStorageBucketName'
+                  - '/*'
+          - Effect: 'Allow'
+            Action:
+              - 's3:PutObject'
+            Resource:
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - Fn::ImportValue: !Sub '${BaseStackName}-DatalakeDestinationStorageBucketName'
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - Fn::ImportValue: !Sub '${BaseStackName}-DatalakeDestinationStorageBucketName'
+                  - '/*'
+
+  S3ReplicationLambda:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Handler: "source/handler/lambda_handler.lambda_handler"
+      Role: !GetAtt S3ReplicationLambdaRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref S3ReplicationLambdaCodeS3Key
+      Runtime: "python3.6"
+      Timeout: 180
+      Environment:
+        Variables:
+          destination_value: !Join
+                          - ''
+                          - - ''
+                            - Fn::ImportValue: !Sub '${BaseStackName}-DatalakeDestinationStorageBucketName'
+  S3ReplicationLambdaLogGroup:
+     Type: AWS::Logs::LogGroup
+     DeletionPolicy: Retain
+     Properties:
+       RetentionInDays: !Ref LogRetentionInDays
+       LogGroupName: !Join
+                 - ''
+                 - - '/aws/lambda/'
+                   - !Ref S3ReplicationLambda
+
+  S3ReplicationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+      - Endpoint: !GetAtt S3ReplicationLambda.Arn
+        Protocol: 'lambda'
+  S3ReplicationTopicPolicy:
+    Type: "AWS::SNS::TopicPolicy"
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: s3.amazonaws.com
+            Action:
+              - 'SNS:Publish'
+            Resource:
+              - !Ref S3ReplicationTopic
+            Condition:
+              StringEquals:
+                AWS:SourceArn:
+                  Fn::ImportValue: !Sub '${BaseStackName}-DatalakeSourceStorageBucketArn'
+      Topics:
+        - !Ref S3ReplicationTopic
+
+  LambdaPermissionForBucket:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref S3ReplicationLambda
+      Principal: 's3.amazonaws.com'
+      SourceAccount: !Ref 'AWS::AccountId'
+      SourceArn:
+        Fn::ImportValue: !Sub '${BaseStackName}-DatalakeLandingBucketArn'
+  LandingBucketConfigurationTrigger:
+    Type: Custom::PutS3BucketConfigurationLambda
+    Condition: IsAccountApollo
+    DependsOn:
+      - LambdaPermissionForBucket
+    Properties:
+      ServiceToken:
+        Fn::ImportValue: !Sub '${LambdaStackName}-LoadinPutS3BucketConfigurationLambdaArn'
+      Bucket:
+        Fn::ImportValue: !Sub '${BaseStackName}-DatalakeLandingBucketName'
+      NotificationConfiguration:
+        LambdaFunctionConfigurations:
+          - Events:
+              - 's3:ObjectCreated:*'
+            LambdaFunctionArn: !GetAtt S3ReplicationLambda.Arn
+
+Outputs:
+  S3ReplicationLambdaName:
+    Description: The name of S3ReplicationLambda
+    Value: !Ref S3ReplicationLambda
+    Export:
+      Name: !Sub '${AWS::StackName}-S3ReplicationLambdaName'

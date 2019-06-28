@@ -1,0 +1,663 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  BaseStackName:
+    Type: String
+    Description: The Cloud Formation stack for base Data Lake components
+    MinLength: 1
+    ConstraintDescription: Must be a valid stack name
+  CatalogStackName:
+    Type: String
+    Description: The Cloud Formation stack for the Catalog Api
+    MinLength: 1
+    ConstraintDescription: Must be a valid stack name
+  AlarmsEnabled:
+    Type: String
+    AllowedValues: [true, false]
+    Description: Enable or disable CloudWatch alarms.
+    Default: true
+  DisableLandingCleanupLambda:
+    Type: String
+    Description: Environment variable value used by CleanUpLandingLambda. When 'true' clean up is disabled.
+    Default: false
+    AllowedValues: [true, false]
+  LambdaCodeS3Bucket:
+    Type: String
+    Description: The S3 bucket containing the zip files of each Lambda's code.
+    MinLength: 1
+    Default: l1-datalake-v1-artifacts
+  CleanUpLandingLambdaCodeS3Key:
+    Type: String
+    Description: The S3 key to CleanUpLandingLambda code. Must be inside LambdaCodeS3Bucket. Must be a zip file.
+    MinLength: 1
+    Default: lambdas/datalake-clean-up-landing.zip
+  MoveFileToStagingLambdaCodeS3Key:
+    Type: String
+    Description: The S3 key to MoveFileToStagingLambda code. Must be inside LambdaCodeS3Bucket. Must be a zip file.
+    MinLength: 1
+    Default: lambdas/datalake-move-to-staging.zip
+  LoadingProcessLambdaCodeS3Key:
+    Type: String
+    Description: The S3 key to LoadingProcessLambda code. Must be inside LambdaCodeS3Bucket. Must be a zip file.
+    MinLength: 1
+    Default: lambdas/datalake_loading_process_lambda.zip
+  S3ReplicationLambdaCodeS3Key:
+    Type: String
+    Description: The S3 key to S3ReplicationLambda code. Must be inside LambdaCodeS3Bucket. Must be a zip file.
+    MinLength: 1
+    Default: lambdas/datalake_s3_replication_lambda.zip  
+  LogRetentionInDays:
+    Type: Number
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+    Description: The number of days to retain the CloudWatch logs
+    Default: 545
+    ConstraintDescription: Possible values are 1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, and 3653
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Alarms"
+        Parameters:
+          - AlarmsEnabled
+      - Label:
+          default: "Dependencies"
+        Parameters:
+          - BaseStackName
+          - CatalogStackName
+      - Label:
+          default: "Lambda Code Locations"
+        Parameters:
+          - LambdaCodeS3Bucket
+          - CleanUpLandingLambdaCodeS3Key
+          - LoadingProcessLambdaCodeS3Key
+          - MoveFileToStagingLambdaCodeS3Key
+
+Conditions:
+  AlarmsEnabled: !Equals [!Ref AlarmsEnabled, true]
+
+Resources:
+
+  CleanUpLandingLambdaRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+
+  CleanUpLandingLambdaS3Policy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      Roles: [!Ref CleanUpLandingLambdaRole]
+      PolicyName: !Sub '${AWS::StackName}-clean-up-landing-s3-policy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Action:
+              - 's3:ListBucket'
+              - 's3:GetObject'
+              - 's3:DeleteObject'
+            Resource:
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - Fn::ImportValue: !Sub '${BaseStackName}-DatalakeLandingBucketName'
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - Fn::ImportValue: !Sub '${BaseStackName}-DatalakeLandingBucketName'
+                  - '/*'
+
+  CleanUpLandingLambda:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Handler: "source/handler/lambda_handler.lambda_handler"
+      Role: !GetAtt CleanUpLandingLambdaRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref CleanUpLandingLambdaCodeS3Key
+      Runtime: "python3.6"
+      Timeout: 180
+      Environment:
+        Variables:
+          LoggingLvl: 'INFO'
+          landing_bucket: !Join
+                          - ''
+                          - - ''
+                            - Fn::ImportValue: !Sub '${BaseStackName}-DatalakeLandingBucketName'
+          region_name: !Sub '${AWS::Region}'
+          disable_cleanup_in_landing: !Ref DisableLandingCleanupLambda
+  CleanUpLandingLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    Properties:
+      RetentionInDays: !Ref LogRetentionInDays
+      LogGroupName: !Join
+                - ''
+                - - '/aws/lambda/'
+                  - !Ref CleanUpLandingLambda
+
+
+  MoveFileToStagingLambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      Path: '/'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'lambda.amazonaws.com'
+            Action: 'sts:AssumeRole'
+
+  MoveFileToStagingLambdaRoleS3Policy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      Roles: [!Ref MoveFileToStagingLambdaRole]
+      PolicyName: 'move-file-to-staging-lambda-s3-policy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Action:
+              - 's3:ListBucket'
+            Resource:
+              - !Sub 'arn:aws:s3:::${BaseStackName}-storage'
+              - !Sub 'arn:aws:s3:::${BaseStackName}-derived-storage'
+
+          - Effect: 'Allow'
+            Action:
+              - 's3:GetObject'
+            Resource:
+              - !Sub 'arn:aws:s3:::${BaseStackName}-storage'
+              - !Sub 'arn:aws:s3:::${BaseStackName}-storage/*'
+              - !Sub 'arn:aws:s3:::${BaseStackName}-derived-storage'
+              - !Sub 'arn:aws:s3:::${BaseStackName}-derived-storage/*'
+
+          - Effect: 'Allow'
+            Action:
+              - 's3:ListBucket'
+            Resource:
+              - !Sub 'arn:aws:s3:::${BaseStackName}-ds-*'
+
+          - Effect: 'Allow'
+            Action:
+              - 's3:PutObject'
+              - 's3:GetObject'
+              - 's3:AbortMultipartUpload'
+              - 's3:ListMultipartUploadParts'
+            Resource:
+              - !Sub 'arn:aws:s3:::${BaseStackName}-ds-*/staging'
+              - !Sub 'arn:aws:s3:::${BaseStackName}-ds-*/staging/*'
+
+  MoveFileToStagingLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref MoveFileToStagingLambdaCodeS3Key
+      Description: create lamdba to move files from storage and write them to staging if staging bucket exists
+      Handler: source/handler/LambdaHandler.lambda_handler
+      Environment:
+        Variables:
+          base_stack_name: !Sub '${BaseStackName}'
+          region_name: !Ref 'AWS::Region'
+          snsTopicArn:
+            Fn::ImportValue: !Sub '${BaseStackName}-DatalakeNotificationTopicArn'
+          LoggingLvl: 'INFO'
+      Role:
+        !GetAtt MoveFileToStagingLambdaRole.Arn
+      Runtime: python3.6
+      Timeout: 300
+  MoveFileToStagingLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    Properties:
+      RetentionInDays: !Ref LogRetentionInDays
+      LogGroupName: !Join
+                - ''
+                - - '/aws/lambda/'
+                  - !Ref MoveFileToStagingLambda
+
+  LoadingProcessLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref LoadingProcessLambdaCodeS3Key
+      Description: create lamdba to insert metadata into dynamo db and move the file from landing to storage
+      Handler: source/handler/LambdaHandler.lambda_handler
+      Environment:
+        Variables:
+          storageBucket:
+            Fn::ImportValue: !Sub '${BaseStackName}-DatalakeStorageBucketName'
+          datalake_catalog_table:
+            Fn::ImportValue: !Sub '${CatalogStackName}-DatalakeMetadataCatalogTableName'
+          region_name: !Ref 'AWS::Region'
+          datalake_catalog_schema_table:
+            Fn::ImportValue: !Sub '${CatalogStackName}-DatalakeMetadataSchemaTableName'
+          landingBucket:
+            Fn::ImportValue: !Sub '${BaseStackName}-DatalakeLandingBucketName'
+          snsTopicArn:
+            Fn::ImportValue: !Sub '${BaseStackName}-DatalakeNotificationTopicArn'
+          LoggingLvl: 'INFO'
+      Role:
+        !GetAtt LoadingProcessLambdaRole.Arn
+      Runtime: python3.6
+      Timeout: 300
+  LoadingProcessLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    Properties:
+      RetentionInDays: !Ref LogRetentionInDays
+      LogGroupName: !Join
+                - ''
+                - - '/aws/lambda/'
+                  - !Ref LoadingProcessLambda
+  LoadingProcessLambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      Path: '/'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'lambda.amazonaws.com'
+            Action: 'sts:AssumeRole'
+  LoadingProcessLambdaRoleS3Policy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      Roles: [!Ref LoadingProcessLambdaRole]
+      PolicyName: 'loading-process-lambda-s3-policy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Action:
+              - 's3:ListBucket'
+              - 's3:PutObject'
+              - 's3:GetObject'
+              - 's3:AbortMultipartUpload'
+              - 's3:ListMultipartUploadParts'
+            Resource:
+              - !Join
+                - ''
+                - - Fn::ImportValue: !Sub '${BaseStackName}-DatalakeLandingBucketArn'
+              - !Join
+                - ''
+                - - Fn::ImportValue: !Sub '${BaseStackName}-DatalakeLandingBucketArn'
+                  - '/*'
+              - !Join
+                - ''
+                - - Fn::ImportValue: !Sub '${BaseStackName}-DatalakeStorageBucketArn'
+              - !Join
+                - ''
+                - - Fn::ImportValue: !Sub '${BaseStackName}-DatalakeStorageBucketArn'
+                  - '/*'
+              - !Join
+                - ''
+                - - Fn::ImportValue: !Sub '${BaseStackName}-DatalakeDerivedStorageBucketArn'
+              - !Join
+                - ''
+                - - Fn::ImportValue: !Sub '${BaseStackName}-DatalakeDerivedStorageBucketArn'
+                  - '/*'
+              - !Join
+                - ''
+                - - Fn::ImportValue: !Sub '${BaseStackName}-DatalakeSecureStorageBucketArn'
+              - !Join
+                - ''
+                - - Fn::ImportValue: !Sub '${BaseStackName}-DatalakeSecureStorageBucketArn'
+                  - '/*'
+  LoadingProcessLambdaRoleDynamoPolicy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      Roles: [!Ref LoadingProcessLambdaRole]
+      PolicyName: 'loading-process-lambda-dynamo-policy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Action:
+              - dynamodb:PutItem
+              - dynamodb:DescribeStream
+              - dynamodb:GetRecords
+              - dynamodb:GetShardIterator
+              - dynamodb:ListStreams
+              - dynamodb:Query
+            Resource:
+              - Fn::ImportValue: !Sub '${CatalogStackName}-DatalakeMetadataCatalogTableArn'
+              - Fn::ImportValue: !Sub '${CatalogStackName}-DatalakeMetadataSchemaTableArn'
+
+  DatalakeCloudWatchPolicy:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Action:
+              - 'logs:CreateLogGroup'
+              - 'logs:CreateLogStream'
+              - 'logs:PutLogEvents'
+              - 'logs:DescribeLogStreams'
+            Resource:
+              - 'arn:aws:logs:*:*:*'
+      PolicyName: !Sub '${AWS::StackName}-cloudwatch-policy'
+      Roles:
+        - !Ref LoadingProcessLambdaRole
+        - !Ref MoveFileToStagingLambdaRole
+        - !Ref CleanUpLandingLambdaRole
+
+  DatasourceStorageBucketConfigurationTrigger:
+    Type: Custom::PutS3BucketConfigurationLambda
+    Properties:
+      ServiceToken: !GetAtt PutS3BucketConfigurationLambda.Arn
+      Bucket:
+        Fn::ImportValue: !Sub '${BaseStackName}-DatalakeStorageBucketName'
+      NotificationConfiguration:
+        TopicConfigurations:
+          - TopicArn: !Ref FileCreatedInStorageBucketTopic
+            Events:
+              - 's3:ObjectCreated:*'
+
+  FileCreatedInStorageBucketTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+      - Endpoint: !GetAtt MoveFileToStagingLambda.Arn
+        Protocol: 'lambda'
+
+  FileCreatedInStorageBucketTopicPolicy:
+    Type: "AWS::SNS::TopicPolicy"
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: s3.amazonaws.com
+            Action:
+              - 'SNS:Publish'
+            Resource:
+              - !Ref FileCreatedInStorageBucketTopic
+            Condition:
+              StringEquals:
+                AWS:SourceArn:
+                  Fn::ImportValue: !Sub '${BaseStackName}-DatalakeStorageBucketArn'
+      Topics:
+        - !Ref FileCreatedInStorageBucketTopic
+
+  DatasourceDerivedStorageBucketConfigurationTrigger:
+    Type: Custom::PutS3BucketConfigurationLambda
+    Properties:
+      ServiceToken: !GetAtt PutS3BucketConfigurationLambda.Arn
+      Bucket:
+        Fn::ImportValue: !Sub '${BaseStackName}-DatalakeDerivedStorageBucketName'
+      NotificationConfiguration:
+        TopicConfigurations:
+          - TopicArn: !Ref FileCreatedInDerivedStorageBucketTopic
+            Events:
+              - 's3:ObjectCreated:*'
+
+  FileCreatedInDerivedStorageBucketTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+      - Endpoint: !GetAtt MoveFileToStagingLambda.Arn
+        Protocol: 'lambda'
+  FileCreatedInDerivedStorageBucketTopicPolicy:
+    Type: "AWS::SNS::TopicPolicy"
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: s3.amazonaws.com
+            Action:
+              - 'SNS:Publish'
+            Resource:
+              - !Ref FileCreatedInDerivedStorageBucketTopic
+            Condition:
+              StringEquals:
+                AWS:SourceArn:
+                  Fn::ImportValue: !Sub '${BaseStackName}-DatalakeDerivedStorageBucketArn'
+      Topics:
+        - !Ref FileCreatedInDerivedStorageBucketTopic
+
+  PutS3BucketConfigurationLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: 'S3 Object Custom Resource'
+      Handler: index.handler
+      Role:
+        Fn::ImportValue: !Sub '${BaseStackName}-LambdaExecutionRoleArn'
+      Code:
+        ZipFile: !Sub |
+          var response = require('cfn-response');
+          var AWS = require('aws-sdk');
+          var s3 = new AWS.S3();
+          exports.handler = function(event, context) {
+            var respond = (e) => response.send(event, context, e ? response.FAILED : response.SUCCESS, e ? e : {});
+            process.on('uncaughtException', e=>failed(e));
+            var params = event.ResourceProperties;
+            delete params.ServiceToken;
+            if (event.RequestType === 'Delete') {
+              params.NotificationConfiguration = {};
+              s3.putBucketNotificationConfiguration(params).promise()
+                .then((data)=>respond())
+                .catch((e)=>respond());
+            } else {
+              s3.putBucketNotificationConfiguration(params).promise()
+                .then((data)=>respond())
+                .catch((e)=>respond(e));
+            }
+          };
+      Environment:
+        Variables:
+          snsTopicArn:
+            Fn::ImportValue: !Sub '${BaseStackName}-DatalakeNotificationTopicArn'
+          env:
+            Fn::ImportValue: !Sub '${BaseStackName}-Environment'
+      Timeout: 30
+      Runtime: nodejs8.10
+  PutS3BucketConfigurationLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    Properties:
+      RetentionInDays: !Ref LogRetentionInDays
+      LogGroupName: !Join
+                - ''
+                - - '/aws/lambda/'
+                  - !Ref PutS3BucketConfigurationLambda
+
+  MoveFileToStagingLambdaInvocationPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref MoveFileToStagingLambda
+      Principal: 'sns.amazonaws.com'
+      SourceArn: !Ref FileCreatedInStorageBucketTopic
+
+  MoveDerivedFileToStagingLambdaInvocationPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref MoveFileToStagingLambda
+      Principal: 'sns.amazonaws.com'
+      SourceArn: !Ref FileCreatedInDerivedStorageBucketTopic
+  # Alarms
+  DataProcessLambdaAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: AlarmsEnabled
+    Properties:
+      AlarmDescription: Data Processing Lambda Alarm
+      AlarmActions:
+        - Fn::ImportValue: !Sub '${BaseStackName}-DatalakeNotificationTopicArn'
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LoadingProcessLambda
+        - Name: Resource
+          Value: !Ref LoadingProcessLambda
+
+  MoveFileToStagingLambdaAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: AlarmsEnabled
+    Properties:
+      AlarmDescription: Move file to staging Lambda Alarm
+      AlarmActions:
+        - Fn::ImportValue: !Sub '${BaseStackName}-DatalakeNotificationTopicArn'
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 5
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref MoveFileToStagingLambda
+        - Name: Resource
+          Value: !Ref MoveFileToStagingLambda
+
+  PutS3BucketConfigurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: AlarmsEnabled
+    Properties:
+      AlarmDescription: PutS3BucketConfiguration Lambda Alarm
+      AlarmActions:
+        - Fn::ImportValue: !Sub '${BaseStackName}-DatalakeNotificationTopicArn'
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref PutS3BucketConfigurationLambda
+        - Name: Resource
+          Value: !Ref PutS3BucketConfigurationLambda
+
+#### Start of S3 Replication Lambda Function ###
+
+    S3ReplicationLambdaRole:
+      Type: "AWS::IAM::Role"
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com
+              Action: "sts:AssumeRole"
+
+    S3ReplicationLambdaPolicy:
+      Type: 'AWS::IAM::Policy'
+      Properties:
+        Roles: [!Ref S3ReplicationLambdaRole]
+        PolicyName: !Sub '${AWS::StackName}-s3-replication-policy'
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: 'Allow'
+              Action:
+                - 'logs:CreateLogGroup'
+                - 'logs:CreateLogStream'
+                - 'logs:PutLogEvents'
+              Resource:
+                - 'arn:aws:logs:*:*:*'
+            - Effect: 'Allow'
+              Action:
+                - 's3:GetObject'
+              Resource:
+                - !Join
+                  - ''
+                  - - 'arn:aws:s3:::'
+                    - Fn::ImportValue: !Sub '${BaseStackName}-DatalakeSourceStorageBucketName'
+                - !Join
+                  - ''
+                  - - 'arn:aws:s3:::'
+                    - Fn::ImportValue: !Sub '${BaseStackName}-DatalakeSourceStorageBucketName'
+                    - '/*'
+            - Effect: 'Allow'
+              Action:
+                - 's3:PutObject'
+              Resource:
+                - !Join
+                  - ''
+                  - - 'arn:aws:s3:::'
+                    - Fn::ImportValue: !Sub '${BaseStackName}-DatalakeDestinationStorageBucketName'
+                - !Join
+                  - ''
+                  - - 'arn:aws:s3:::'
+                    - Fn::ImportValue: !Sub '${BaseStackName}-DatalakeDestinationStorageBucketName'
+                    - '/*'
+
+    S3ReplicationLambda:
+      Type: "AWS::Lambda::Function"
+      Properties:
+        Handler: "source/handler/lambda_handler.lambda_handler"
+        Role: !GetAtt S3ReplicationLambdaRole.Arn
+        Code:
+          S3Bucket: !Ref LambdaCodeS3Bucket
+          S3Key: !Ref CleanUpLandingLambdaCodeS3Key
+        Runtime: "python3.6"
+        Timeout: 180
+        Environment:
+          Variables:
+            destination_value: !Join
+                            - ''
+                            - - ''
+                              - Fn::ImportValue: !Sub '${BaseStackName}-DatalakeDestinationStorageBucketName'
+    S3ReplicationLambdaLogGroup:
+      Type: AWS::Logs::LogGroup
+      DeletionPolicy: Retain
+      Properties:
+        RetentionInDays: !Ref LogRetentionInDays
+        LogGroupName: !Join
+                  - ''
+                  - - '/aws/lambda/'
+                    - !Ref S3ReplicationLambda
+
+#### End of S3 Replication Lambda Function ###
+
+Outputs:
+  CleanUpLandingLambdaName:
+    Description: The name of CleanUpLandingLambda
+    Value: !Ref CleanUpLandingLambda
+    Export:
+      Name: !Sub '${AWS::StackName}-CleanUpLandingLambdaName'
+  MoveFileToStagingLambdaName:
+    Description: The name of MoveFileToStagingLambda
+    Value: !Ref MoveFileToStagingLambda
+    Export:
+      Name: !Sub '${AWS::StackName}-MoveFileToStagingLambdaName'
+  LoadingProcessLambdaName:
+    Description: The name of LoadingProcessLambda
+    Value: !Ref LoadingProcessLambda
+    Export:
+      Name: !Sub '${AWS::StackName}-LoadingProcessLambdaName'
+  PutS3BucketConfigurationLambdaArn:
+    Description: The arn of PutS3BucketConfigurationLambda
+    Value: !GetAtt PutS3BucketConfigurationLambda.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LoadinPutS3BucketConfigurationLambdaArn'
+  S3ReplicationLambdaName:
+    Description: The name of CleanUpLandingLambda
+    Value: !Ref CleanUpLandingLambda
+    Export:
+      Name: !Sub '${AWS::StackName}-S3ReplicationLambdaName'

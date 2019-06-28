@@ -1,0 +1,280 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  SourceStorageBucketName:
+    Type: String
+    Description: The source S3 bucket from which data needs to be copied
+    Default: ''
+  SourceStorageBucketArn:
+    Type: String
+    Description: The ARN of the source S3 bucket
+    Default: ''
+  DestinationStorageBucketName:
+    Type: String
+    Description: The destination S3 bucket to which data needs to be replicated
+    Default: ''
+  AlarmsEnabled:
+    Type: String
+    AllowedValues: [true, false]
+    Description: Enable or disable CloudWatch alarms.
+    Default: true
+  LambdaCodeS3Bucket:
+    Type: String
+    Description: The S3 bucket containing the zip files of each Lambda's code.
+    MinLength: 1
+    Default: shah-testing-datahub1
+  S3ReplicationLambdaCodeS3Key:
+    Type: String
+    Description: The S3 key to S3ReplicationLambda code. Must be inside LambdaCodeS3Bucket. Must be a zip file.
+    MinLength: 1
+    Default: shah-testing-datahub-lambda.zip
+  LogRetentionInDays:
+    Type: Number
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+    Description: The number of days to retain the CloudWatch logs
+    Default: 545
+    ConstraintDescription: Possible values are 1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, and 3653
+  NumOfSqsMessagesToProcess:
+    Type: Number
+    Description: Number of SQS messages to process before Lambda Timeout.
+    Default: 40
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Alarms"
+        Parameters:
+          - AlarmsEnabled
+      - Label:
+          default: "Dependencies"
+#        Parameters:
+#          - BaseStackName
+#          - CatalogStackName
+      - Label:
+          default: "Lambda Code Locations"
+        Parameters:
+          - SourceStorageBucketName
+          - SourceStorageBucketArn
+          - DestinationStorageBucketName
+          - LambdaCodeS3Bucket
+          - S3ReplicationLambdaCodeS3Key
+
+Conditions:
+  AlarmsEnabled: !Equals [!Ref AlarmsEnabled, true]
+
+Resources:
+
+  S3ReplicationLambdaRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-S3ReplicationLambdaRole'
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+
+  S3ReplicationLambdaPolicy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      Roles: [!Ref S3ReplicationLambdaRole]
+      PolicyName: !Sub '${AWS::StackName}-cloud-policy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - 'logs:CreateLogGroup'
+              - 'logs:CreateLogStream'
+              - 'logs:PutLogEvents'
+            Resource:
+              - 'arn:aws:logs:*:*:*'
+
+  S3ReplicationLambdaS3Policy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      Roles: [!Ref S3ReplicationLambdaRole]
+      PolicyName: !Sub '${AWS::StackName}-s3-policy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+            - Effect: "Allow"
+              Action:
+                - 's3:ListBucket'
+                - 's3:GetObject'
+                - 'lambda:InvokeFunction'
+              Resource: !Sub 'arn:aws:s3:::${SourceStorageBucketName}/*'
+            - Effect: "Allow"
+              Action:
+                - 's3:PutObject'
+                - 'lambda:InvokeFunction'
+              Resource: !Sub 'arn:aws:s3:::${DestinationStorageBucketName}/*'
+
+  S3ReplicationLambdaSQSPolicy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      Roles: [!Ref S3ReplicationLambdaRole]
+      PolicyName: !Sub '${AWS::StackName}-sqs-policy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Action:
+              - 'sqs:SendMessage'
+              - 'sqs:ReceiveMessage'
+              - 'sqs:DeleteMessage'
+              - 'sqs:GetQueueAttributes'
+            Resource:
+              - !GetAtt S3ReplicationFileQueue.Arn
+
+  S3ReplicationFileQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      # QueueName: !Sub '${AWS::StackName}-S3ReplicationFileQueue
+      # rentention period is 7 days
+      MessageRetentionPeriod: "604800"
+
+  S3ReplicationLambda:
+    Type: "AWS::Lambda::Function"
+    DependsOn:
+      - S3ReplicationLambdaRole
+      - S3ReplicationLambdaSQSPolicy
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-S3ReplicationLambda
+      Handler: "lambda_function.lambda_handler"
+      Role: !GetAtt S3ReplicationLambdaRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref S3ReplicationLambdaCodeS3Key
+      Runtime: "python3.6"
+      Timeout: 300
+      Environment:
+        Variables:
+          destination_value: !Ref DestinationStorageBucketName
+      DeadLetterConfig:
+        TargetArn: !GetAtt S3ReplicationFileQueue.Arn
+
+  S3ReplicationLambdaLogGroup:
+     Type: AWS::Logs::LogGroup
+     DeletionPolicy: Retain
+     Properties:
+       RetentionInDays: !Ref LogRetentionInDays
+       LogGroupName: !Join
+                 - ''
+                 - - '/aws/lambda/'
+                   - !Ref S3ReplicationLambda
+
+  S3ReplicationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${AWS::StackName}-fanout
+      Subscription:
+      - Endpoint: !GetAtt S3ReplicationLambda.Arn
+        Protocol: 'lambda'
+  S3ReplicationTopicPolicy:
+    Type: "AWS::SNS::TopicPolicy"
+    Properties:
+      PolicyDocument:
+        Version: '2008-10-17'
+        Id: '<default_policy_ID>'
+        Statement:
+          - Sid: '<default_statement_ID>'
+            Effect: 'Allow'
+            Principal:
+              AWS: "*"
+            Action:
+              - 'SNS:Publish'
+            Resource:
+              - !Ref S3ReplicationTopic
+            Condition:
+              ArnLike:
+                AWS:SourceArn:
+                  - !Ref SourceStorageBucketArn
+      Topics:
+        - !Ref S3ReplicationTopic
+
+  LambdaPermissionForBucket:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: 'lambda:InvokeFunction'
+#      FunctionName: !Ref S3ReplicationLambda
+      FunctionName: !GetAtt S3ReplicationLambda.Arn
+      Principal: 'sns.amazonaws.com'
+      SourceArn: !Ref S3ReplicationTopic
+
+  # S3ReplicationTopicSubscription:
+  #   Type: 'AWS::SNS::Subscription'
+  #   DependsOn:
+  #     - S3ReplicationLambda
+  #     - S3ReplicationTopic
+  #     - S3ReplicationTopicPolicy
+  #   Properties:
+  #     TopicArn: !Ref S3ReplicationTopic
+  #     Protocol: lambda
+  #     Endpoint: !GetAtt S3ReplicationLambda.Arn
+
+  S3ReplicationNotificationTopic:
+    Type: 'AWS::SNS::Topic'
+    Properties:
+      TopicName: !Sub '${AWS::StackName}-notifications'
+      DisplayName: !Sub 'Notifications for ${AWS::StackName}'
+      Subscription:
+        -
+          Endpoint: "smohammed@loyalty.com"
+          Protocol: "email"
+
+  S3ReplicationLambdaAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: AlarmsEnabled
+    Properties:
+      AlarmDescription: S3 Replication Lambda Alarm
+      AlarmActions:
+        - !Ref S3ReplicationNotificationTopic
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 5
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref S3ReplicationLambda
+        - Name: Resource
+          Value: !Ref S3ReplicationLambda
+
+  S3QueueMessageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: AlarmsEnabled
+    Properties:
+      AlarmDescription: "Alarm if queue message is greater than 0"
+      AlarmActions:
+        - !Ref S3ReplicationNotificationTopic
+      Namespace: "AWS/SQS"
+      MetricName: "ApproximateNumberOfMessagesVisible"
+      Statistic: "Sum"
+      Period: "300"
+      EvaluationPeriods: "1"
+      Threshold: "0"
+      ComparisonOperator: "GreaterThanThreshold"
+      Dimensions:
+        - Name: QueueName
+          Value: { "Fn::GetAtt": [ "S3ReplicationFileQueue", "QueueName"] }
+
+  # AddSNSTopicToS3:
+  #   Type: AWS::S3::Bucket
+  #   Properties:
+  #       BucketName: !Ref SourceStorageBucketName #Import the bucketname from other CF
+  #       NotificationConfiguration:
+  #         TopicConfigurations:
+  #           - Event: 's3:ObjectCreated:*'
+  #             Topic: !Ref S3ReplicationTopic
+
+Outputs:
+  S3ReplicationLambdaName:
+    Description: The name of S3ReplicationLambda
+    Value: !Ref S3ReplicationLambda
+    Export:
+      Name: !Sub '${AWS::StackName}-S3ReplicationLambdaName'
