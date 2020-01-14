@@ -1,0 +1,147 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Create an S3 bucket"
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues:
+    - dev
+    - uat
+    - cert
+    - prod
+    Default: dev
+    Description: "The environment"
+  AccessControl:
+    Type: String
+    AllowedValues:
+    - Private
+    - PublicReadWrite
+    Default: Private
+    Description: "The Access Control"
+  BucketName:
+    Type: String
+    Description: "The bucket name"
+    MinLength: 1
+    ConstraintDescription: "Must be a non-empty value, bucket name will be {Environment}-{BucketName}"
+  EnableVersioning:
+    Description: "enable versioning"
+    Type: String
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Default: 'false'
+  S3Principal:
+    Type: String
+    Description: "The princal value"
+    MinLength: 1
+    Default: 'arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity EE4H25PRPTCN3'
+  # OriginDomainNameS3:
+  #   Type: String
+  #   Description: "Enter the S3 Origin Domain Name for CloudFront"
+  #   MinLength: 1
+    ConstraintDescription: "Must be in format mybucketname.s3.amazonaws.com"
+  OriginDomainNameLB:
+    Type: String
+    Description: "Enter the Load Balancer Origin Domain Name for CloudFront"
+    MinLength: 1
+    ConstraintDescription: "Must be in format myloadbalancer.elb.amazonaws.com"
+  AlternateDomainName:
+    Type: String
+    Description: "Enter the Alternate Domain Name (CNAME) for CloudFront"
+    MinLength: 1
+  CertificateArn:
+    Type: String
+    Description: "Enter the Certificate ARN to use with CloudFront"
+    MinLength: 1
+Resources:
+  S3Bucket:
+    Type: "AWS::S3::Bucket"
+    DeletionPolicy: Retain
+    Properties:
+      AccessControl: !Ref AccessControl
+      BucketName: !Sub "${Environment}-${BucketName}"
+
+  BucketOnlyAllowSSLPolicy:
+    Type: "AWS::S3::BucketPolicy"
+    Properties:
+      Bucket:
+        Ref: 'S3Bucket'
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              AWS: !Ref S3Principal
+            Action: "s3:GetObject"
+            Resource: !Sub "arn:aws:s3:::${Environment}-${BucketName}/*"
+            Condition:
+              Bool:
+                "aws:SecureTransport": false
+          -
+            Effect: Allow
+            Principal:
+              AWS: !Ref S3Principal
+            Action: "s3:ListBucket"
+            Resource: !Sub "arn:aws:s3:::${Environment}-${BucketName}"
+            Condition:
+              Bool:
+                "aws:SecureTransport": false
+          -
+            Effect: Deny
+            Principal: "*"
+            Action: "*"
+            Resource: !Sub "arn:aws:s3:::${Environment}-${BucketName}/*"
+            Condition:
+              Bool:
+                "aws:SecureTransport": false
+
+  CloudFront:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Origins:
+        - DomainName: !Sub "${Environment}-${BucketName}.s3.amazonaws.com"
+          Id: 'Airmiles Web BFF S3'
+          S3OriginConfig:
+            OriginAccessIdentity: origin-access-identity/cloudfront/EE4H25PRPTCN3
+        - DomainName: !Ref OriginDomainNameLB
+          Id: 'Airmiles Web BFF LB'
+          CustomOriginConfig:
+            HTTPPort: 80
+            HTTPSPort: 443
+            OriginKeepaliveTimeout: 5
+            OriginProtocolPolicy: https-only
+            OriginReadTimeout: 30
+            OriginSSLProtocols:
+              - TLSv1.1
+        HttpVersion: http2
+        PriceClass: PriceClass_100
+        Enabled: 'true'
+        # Logging:
+        #   IncludeCookies: 'false'
+        #   # Bucket: !Sub "${Environment}-${BucketName}"
+        #   Bucket: test-bucket-bff.s3.amazonaws.com
+        Aliases:
+        - !Ref AlternateDomainName
+        IPV6Enabled: 'true'
+        DefaultCacheBehavior:
+          AllowedMethods:
+          - GET
+          - HEAD
+          TargetOriginId: 'Airmiles Web BFF LB'
+          ForwardedValues:
+            QueryString: 'false'
+            Cookies:
+              Forward: none
+          ViewerProtocolPolicy: allow-all
+        ViewerCertificate:
+          AcmCertificateArn: !Ref CertificateArn
+          SslSupportMethod: sni-only
+
+Outputs:
+  BucketName:
+    Description: "Name of newly created S3 bucket"
+    Value: !Ref 'S3Bucket'
+  CloudFront:
+    Description: "Name of newly created CloudFront"
+    Value: Fn::GetAtt CloudFront

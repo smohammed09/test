@@ -1,0 +1,408 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Creates a service / task def for sample play
+Parameters:
+  NetworkStackName:
+    Type: String
+  ClusterStackName:
+    Description: Name of an active CloudFormation stack that contains an ECS cluster
+    Type: String
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: ^[a-zA-Z][-a-zA-Z0-9]*$
+  CertificateArn:
+    Type: String
+    Description: ARN of the certificate
+  ListenerPort:
+    Type: Number
+    Description: The port to register with the Load Balancer
+  AppName:
+    Type: String
+    Description: Name of app. Should be the same as docker repository name.
+  Environment:
+    Description: Type of environment
+    Type: String
+    AllowedValues: [ dev, uat, cert, prod ]
+  AppVersion:
+    Type: String
+    Description: Version label of app
+  AppContainerPort:
+    Type: Number
+    Description: Port the app runs on in the image
+    Default: '8080'
+  ImageRepository:
+    Type: String
+    Description: The URI of the image repository where the app is published. Do not
+      include app name in URI.
+    Default: 277983268692.dkr.ecr.us-east-1.amazonaws.com
+  AppMemory:
+    Type: Number
+    Description: Soft memory of app container
+  AppCpu:
+    Type: Number
+    Description: cpu units of app container
+  AppDesiredCount:
+    Type: Number
+    Description: Number of instances of the service to run
+    Default: '1'
+  AppMaxCount:
+    Type: Number
+    Description: Max number of instances of the service to scale out to
+    Default: '1'
+  AppMinCount:
+    Type: Number
+    Description: Min number of instances of the service to scale in to
+    Default: '1'
+  AutoScaleHighThreshold:
+    Type: Number
+    Description: Percentage of service memory utilization that is considered high
+    Default: '50'
+  AutoScaleLowThreshold:
+    Type: Number
+    Description: Percentage of service memory utilization that is considered low
+    Default: '20'
+  LogRetention:
+    Type: Number
+    Description: Number of days to retain logs in CWL
+    Default: '14'
+  KmsKey:
+    Type: String
+    Description: The ARN of a KMS CMK to use to decrypt secure environment variables
+
+Resources:
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${Environment}-${AppName}"
+      Port: 443
+      Protocol: HTTP
+      TargetType: ip
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '20'
+      VpcId:
+        Fn::ImportValue:
+          !Sub ${NetworkStackName}-VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub 'ECS Target Group - ${AWS::StackName}'
+  Listener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    Properties:
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - TargetGroupArn: !Ref TargetGroup
+          Type: forward
+      LoadBalancerArn: !ImportValue
+        Fn::Sub: ${ClusterStackName}-ApplicationLoadBalancerARN
+      Port: '80'
+      Protocol: HTTP
+      SslPolicy: ELBSecurityPolicy-TLS-1-2-2017-01
+  EcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ''
+            Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: ECS-CMK-Decrypt-Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                Resource:
+                  - !Ref 'KmsKey'
+        - PolicyName: CloudWatch-Metrics-Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource:
+                  - '*'
+        - PolicyName: !Sub '${AppName}-s3-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource:
+                  - arn:aws:s3:::airmiles-web-bff-custom-errors/*
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - arn:aws:s3:::airmiles-web-bff-custom-errors
+        - PolicyName: ECS-Task-Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:DescribeTaskDefinition
+                Resource:
+                  - '*'
+              - Effect: Allow
+                Action:
+                  - ecs:RunTask
+                Resource:
+                  - !Sub 'arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/${Environment}-data-extract-cron*'
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource:
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${Environment}-data-extract-cron-EcsExecutionTaskRole*'
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${Environment}-data-extract-cron-EcsTaskRole*'
+
+  EcsExecutionTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ''
+            Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ContainerDefinitions:
+        - Name: !Ref 'AppName'
+          Image: !Sub '${ImageRepository}/${AppName}:${AppVersion}'
+          Cpu: !Ref 'AppCpu'
+          Command:
+            - /data/start.sh
+            - !Ref Environment
+          PortMappings:
+            - ContainerPort: !Ref 'AppContainerPort'
+          MemoryReservation: !Ref 'AppMemory'
+          Essential: 'true'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref 'LogGroup'
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: ecs
+              awslogs-datetime-format: '%Y-%m-%d %H:%M:%S'
+      Family: !Ref 'AWS::StackName'
+      TaskRoleArn: !Ref 'EcsTaskRole'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !Ref 'EcsExecutionTaskRole'
+      Cpu: !Ref 'ContainerTotalCpu'
+      Memory: !Ref 'ContainerTotalMemory'
+
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - Listener
+      - LogGroup
+    Properties:
+      ServiceName: !Ref 'AWS::StackName'
+      LaunchType: FARGATE
+      TaskDefinition: !Ref 'TaskDefinition'
+      DesiredCount: !Ref 'AppDesiredCount'
+      LoadBalancers:
+        - TargetGroupArn: !Ref 'TargetGroup'
+          ContainerPort: !Ref AppContainerPort
+          ContainerName: !Ref AppName
+      Cluster: !Ref ClusterStackName
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - Fn::ImportValue:
+                !Sub ${NetworkStackName}-Private-A-SubID
+            - Fn::ImportValue:
+                !Sub ${NetworkStackName}-Private-B-SubID
+            - Fn::ImportValue:
+                !Sub ${NetworkStackName}-Private-C-SubID
+          SecurityGroups:
+            - !Ref 'AppSecurityGroup'
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${Environment}-${AppName}-sg'
+      GroupDescription: ECS Allowed Ports
+      VpcId:
+        Fn::ImportValue:
+          !Sub ${NetworkStackName}-VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp:
+            Fn::ImportValue:
+              !Sub ${NetworkStackName}-Public-A-CIDR
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp:
+            Fn::ImportValue:
+              !Sub ${NetworkStackName}-Public-B-CIDR
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp:
+            Fn::ImportValue:
+              !Sub ${NetworkStackName}-Public-C-CIDR
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: !Ref 'LogRetention'
+      LogGroupName: !Ref 'AWS::StackName'
+  EcsAutoScaleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: application-autoscaling.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceAutoscaleRole
+  ScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: !Ref 'AppMaxCount'
+      MinCapacity: !Ref 'AppMinCount'
+      ResourceId: !Sub 'service/${ClusterStackName}/${Service.Name}'
+      RoleARN: !GetAtt 'EcsAutoScaleRole.Arn'
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+  ScaleUpPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub '${Service.Name}-ScaleUpPolicy'
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref 'ScalableTarget'
+      StepScalingPolicyConfiguration:
+        AdjustmentType: PercentChangeInCapacity
+        Cooldown: 60
+        MetricAggregationType: Average
+        StepAdjustments:
+          - MetricIntervalLowerBound: 0
+            MetricIntervalUpperBound: 10
+            ScalingAdjustment: 2
+          - MetricIntervalLowerBound: 10
+            ScalingAdjustment: 1
+  ScaleDownPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub '${Service.Name}-ScaleDownPolicy'
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref 'ScalableTarget'
+      StepScalingPolicyConfiguration:
+        AdjustmentType: PercentChangeInCapacity
+        Cooldown: 60
+        MetricAggregationType: Average
+        StepAdjustments:
+          - MetricIntervalLowerBound: -10
+            MetricIntervalUpperBound: 0
+            ScalingAdjustment: -10
+          - MetricIntervalUpperBound: -10
+            ScalingAdjustment: -30
+  CpuUtilAlarmHigh:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Cpu utilization alarm for ECS service for high cpu usage
+      AlarmActions:
+        - !Ref 'ScaleUpPolicy'
+      MetricName: CPUUtilization
+      Namespace: AWS/ECS
+      Statistic: Average
+      Period: '120'
+      EvaluationPeriods: '2'
+      Threshold: !Ref 'AutoScaleHighThreshold'
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref 'ClusterStackName'
+        - Name: ServiceName
+          Value: !GetAtt 'Service.Name'
+  CpuUtilAlarmLow:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Cpu utilization alarm for ECS service for low cpu usage
+      AlarmActions:
+        - !Ref 'ScaleDownPolicy'
+      MetricName: CPUUtilization
+      Namespace: AWS/ECS
+      Statistic: Average
+      Period: '120'
+      EvaluationPeriods: '2'
+      Threshold: !Ref 'AutoScaleLowThreshold'
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref 'ClusterStackName'
+        - Name: ServiceName
+          Value: !GetAtt 'Service.Name'
+  PagerDutyZeroHealthyInstances:
+    Type: AWS::CloudWatch::Alarm
+    Condition: CreatePagerDutyAlarms
+    Properties:
+      AlarmDescription: Triggers when there are 0 healthy ECS instances in service
+      AlarmActions:
+        - !Ref PagerDutyTopic
+      OKActions:
+        - !Ref PagerDutyTopic
+      MetricName: HealthyHostCount
+      Namespace: AWS/NetworkELB
+      Statistic: Minimum
+      Period: '60'
+      EvaluationPeriods: '5'
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      Dimensions:
+        - Name: TargetGroup
+          Value: !GetAtt 'TargetGroup.TargetGroupFullName'
+        - Name: LoadBalancer
+          Value: !Select
+            - '1'
+            - !Split
+              - loadbalancer/
+              - !ImportValue
+                Fn::Sub: "${ClusterStackName}-NetworkLoadBalancerARN"
+Outputs:
+  Service:
+    Description: The name of the ECS service created
+    Value: !GetAtt 'Service.Name'
+    Export:
+      Name: !Sub '${AWS::StackName}-ServiceName'
+  TaskFamily:
+    Description: The family of the task created for the service
+    Value: !Ref 'AWS::StackName'
+  TaskArn:
+    Description: The ARN of the task created for the service
+    Value: !Ref 'TaskDefinition'
+  LogGroup:
+    Description: The name of the log group created for the app
+    Value: !Ref 'LogGroup'
+    Export:
+      Name: !Sub '${AWS::StackName}-LogGroupName'
