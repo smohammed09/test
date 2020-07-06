@@ -1,29 +1,18 @@
-class Student {
-   private int StudentID;
-   private String StudentName;
-    
-   void setStudentID(int pID) {
-      StudentID = pID;
-   }
-    
-   void setStudentName(String pName) {
-      StudentName = pName;
-   }
-    
-   int getStudentID() {
-      return this.StudentID;
-   }
-    
-   String getStudentName() {
-      return this.StudentName;
-   }
-    
-   static void main(String[] args) {
-      Student st = new Student();
-      st.setStudentID(1);
-      st.setStudentName("Joe");
-        
-      println(st.getStudentID());
-      println(st.getStudentName());
-   } 
-}
+apiVersion: v1
+kind: Pod
+metadata:
+   name: test
+
+spec:
+  containers:
+  - name: nginx
+    image: nginx:latest
+    ports:
+      - containerPort: 80
+  
+  - name: ubuntu
+    image: ubuntu:latest
+    ports:
+      - containerPort: 88    
+
+   
